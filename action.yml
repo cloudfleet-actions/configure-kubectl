@@ -1,0 +1,74 @@
+name: 'Configure kubectl for Cloudfleet'
+description: 'Authenticate to a Cloudfleet (CFKE) cluster using GitHub OIDC and write a kubeconfig.'
+author: 'Cloudfleet'
+branding:
+  icon: 'cloud'
+  color: 'blue'
+
+inputs:
+  cluster-id:
+    description: 'CFKE cluster ID (UUID).'
+    required: true
+  region:
+    description: 'Cluster region (e.g. europe-central-1a).'
+    required: true
+outputs:
+  kubeconfig:
+    description: 'Path to the kubeconfig file written by this action.'
+    value: ${{ steps.write.outputs.kubeconfig }}
+
+runs:
+  using: composite
+  steps:
+    - id: token
+      uses: actions/github-script@v9
+      env:
+        CLUSTER_ID: ${{ inputs.cluster-id }}
+      with:
+        script: |
+          const audience = `https://api.cloudfleet.ai/v1/clusters/${process.env.CLUSTER_ID}`
+          const token = await core.getIDToken(audience)
+          core.setSecret(token)
+          core.setOutput('token', token)
+          core.setOutput('audience', audience)
+
+    - id: write
+      shell: bash
+      env:
+        TOKEN: ${{ steps.token.outputs.token }}
+        AUDIENCE: ${{ steps.token.outputs.audience }}
+        CLUSTER_ID: ${{ inputs.cluster-id }}
+        REGION: ${{ inputs.region }}
+      run: |
+        set -euo pipefail
+
+        if ! command -v kubectl >/dev/null 2>&1; then
+          echo "::error::kubectl is not installed. Add a step like 'azure/setup-kubectl@v5' before this action." >&2
+          exit 1
+        fi
+
+        CONTEXT="${CLUSTER_ID}"
+        SERVER="https://${CLUSTER_ID}.${REGION}.cfke.io"
+
+        WORKDIR="${RUNNER_TEMP:-/tmp}"
+        KUBECONFIG_PATH="${WORKDIR}/cloudfleet-kubeconfig"
+        : > "${KUBECONFIG_PATH}"
+        chmod 600 "${KUBECONFIG_PATH}"
+
+        kubectl config set-cluster "${CONTEXT}" \
+          --server="${SERVER}" \
+          --kubeconfig="${KUBECONFIG_PATH}" >/dev/null
+
+        kubectl config set-credentials "${CONTEXT}" \
+          --token="${TOKEN}" \
+          --kubeconfig="${KUBECONFIG_PATH}" >/dev/null
+
+        kubectl config set-context "${CONTEXT}" \
+          --cluster="${CONTEXT}" \
+          --user="${CONTEXT}" \
+          --kubeconfig="${KUBECONFIG_PATH}" >/dev/null
+
+        kubectl config use-context "${CONTEXT}" --kubeconfig="${KUBECONFIG_PATH}" >/dev/null
+
+        echo "KUBECONFIG=${KUBECONFIG_PATH}" >> "${GITHUB_ENV}"
+        echo "kubeconfig=${KUBECONFIG_PATH}" >> "${GITHUB_OUTPUT}"
